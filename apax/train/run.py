@@ -207,7 +207,9 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
         n_full_models = config.model.ensemble.n_members
     else:
         n_full_models = 1
-    params, rng_key = create_params(model, rng_key, sample_input, n_full_models)
+    params, dropout_key, rng_key = create_params(
+        model, rng_key, sample_input, n_full_models
+    )
 
     freeze_layers = []
     do_transfer_learning = config.transfer_learning is not None
@@ -250,6 +252,7 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
         patience_min_delta=config.patience_min_delta,
         disable_pbar=config.progress_bar.disable_epoch_pbar,
         disable_batch_pbar=config.progress_bar.disable_batch_pbar,
+        dropout_rate=config.dropout_rate,
         is_ensemble=n_full_models > 1,
         data_parallel=config.data_parallel,
         ema_handler=ema_handler,

@@ -414,6 +414,8 @@ class Config(BaseModel, frozen=True, extra="forbid"):
         | Minimum change in the monitored quantity to qualify as an improvement.
     seed : int, default = 1
         | Random seed.
+    dropout_rate : float, default = 0.0
+        | Rate of node dropout during training.
     data : :class:`.DataConfig`
         | Data configuration.
     model : :class:`.ModelConfig`
@@ -444,6 +446,7 @@ class Config(BaseModel, frozen=True, extra="forbid"):
     patience: Optional[PositiveInt] = None
     patience_min_delta: NonNegativeFloat = 0.0
     seed: int = 1
+    dropout_rate: NonNegativeFloat = 0.0
     data_parallel: bool = True
     ckpt_interval: PositiveInt = 500
 

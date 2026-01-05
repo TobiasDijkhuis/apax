@@ -15,6 +15,10 @@ from apax.config.train_config import Config
 log = logging.getLogger(__name__)
 
 
+class TrainState(train_state.TrainState):
+    key: jax.Array
+
+
 def check_for_ensemble(params: FrozenDict) -> int:
     """Checks if a set of parameters belongs to an ensemble model.
     This is the case if all parameters share the same first dimension (parameter batch)
@@ -29,14 +33,15 @@ def check_for_ensemble(params: FrozenDict) -> int:
         return 1
 
 
-def create_train_state(model, params: FrozenDict, tx):
+def create_train_state(model, params: FrozenDict, tx, dropout_key):
     n_models = check_for_ensemble(params)
 
     def create_single_train_state(params):
-        state = train_state.TrainState.create(
+        state = TrainState.create(
             apply_fn=model,
             params=params,
             tx=tx,
+            key=dropout_key,
         )
         return state
 
@@ -48,9 +53,11 @@ def create_train_state(model, params: FrozenDict, tx):
     return train_state_fn(params)
 
 
-def create_params(model, rng_key, sample_input: tuple, n_models: int):
-    keys = jax.random.split(rng_key, num=n_models + 1)
-    rng_key, model_rng = keys[0], keys[1:]
+def create_params(
+    model, rng_key, sample_input: tuple, n_models: int, deterministic: bool
+):
+    keys = jax.random.split(rng_key, num=n_models + 2)
+    rng_key, dropout_key, model_rng = keys[0], keys[1], keys[2:]
 
     log.info(f"Initializing {n_models} model(s)")
 
@@ -66,7 +73,7 @@ def create_params(model, rng_key, sample_input: tuple, n_models: int):
 
     params = freeze(params)
 
-    return params, rng_key
+    return params, dropout_key, rng_key
 
 
 def load_state(state, ckpt_dir):

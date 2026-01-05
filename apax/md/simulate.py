@@ -500,6 +500,7 @@ def md_setup(model_config: Config, md_config: MDConfig):
         apply_mask=True,
         init_box=np.array(system.box),
         inference_disp_fn=displacement_fn,
+        deterministic=True,
     )
     neighbor_fn = partition.neighbor_list(
         displacement_fn,

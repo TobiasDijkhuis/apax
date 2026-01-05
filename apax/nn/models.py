@@ -92,6 +92,7 @@ class EnergyModel(nn.Module):
         box,
         offsets,
         perturbation=None,
+        deterministic: Optional[bool] = None,
     ):
         dr_vec, idx = self.compute_distances(
             R,
@@ -105,7 +106,7 @@ class EnergyModel(nn.Module):
         # shape Natoms
         # shape shallow ens: Natoms x Nensemble
         g = self.representation(dr_vec, Z, idx)
-        h = jax.vmap(self.readout)(g)
+        h = jax.vmap(self.readout)(g, deterministic=deterministic)
         E_i = self.scale_shift(h, Z)
 
         if self.mask_atoms:
@@ -150,9 +151,12 @@ class EnergyDerivativeModel(nn.Module):
         neighbor: Union[partition.NeighborList, Array],
         box,
         offsets,
+        deterministic: Optional[bool] = None,
     ):
         ef_function = jax.value_and_grad(self.energy_model, has_aux=True)
-        (energy, properties), neg_forces = ef_function(R, Z, neighbor, box, offsets)
+        (energy, properties), neg_forces = ef_function(
+            R, Z, neighbor, box, offsets, determinstic=deterministic
+        )
         forces = -neg_forces
         prediction = {"energy": energy, "forces": forces}
         prediction.update(properties)
@@ -165,6 +169,7 @@ class EnergyDerivativeModel(nn.Module):
                 Z=Z,
                 neighbor=neighbor,
                 offsets=offsets,
+                deterministic=deterministic,
             )
             prediction["stress"] = stress
 
@@ -179,8 +184,11 @@ def make_mean_energy_fn(energy_fn):
         box,
         offsets,
         perturbation=None,
+        deterministic: Optional[bool] = None,
     ):
-        e_ens, _ = energy_fn(R, Z, neighbor, box, offsets, perturbation)
+        e_ens, _ = energy_fn(
+            R, Z, neighbor, box, offsets, perturbation, deterministic=deterministic
+        )
         E_mean = jnp.mean(e_ens)
         return E_mean
 
@@ -188,8 +196,12 @@ def make_mean_energy_fn(energy_fn):
 
 
 def make_member_chunk_jac(energy_model, start, end):
-    def energy_chunk_fn(R, Z, neighbor, box, offsets):
-        Ei = energy_model(R, Z, neighbor, box, offsets)[start:end]
+    def energy_chunk_fn(
+        R, Z, neighbor, box, offsets, deterministic: Optional[bool] = False
+    ):
+        Ei = energy_model(R, Z, neighbor, box, offsets, deterministic=deterministic)[
+            start:end
+        ]
         return Ei
 
     grad_i_fn = jax.jacrev(energy_chunk_fn)
@@ -213,8 +225,11 @@ class ShallowEnsembleModel(nn.Module):
         neighbor: Union[partition.NeighborList, Array],
         box,
         offsets,
+        deterministic: Optional[bool] = None,
     ):
-        energy_ens, properties = self.energy_model(R, Z, neighbor, box, offsets)
+        energy_ens, properties = self.energy_model(
+            R, Z, neighbor, box, offsets, deterministic=deterministic
+        )
         # The two functions below drop the calculation of properties
         mean_energy_fn = make_mean_energy_fn(self.energy_model)
         energy_fn = make_energy_only_model(self.energy_model)
@@ -233,7 +248,9 @@ class ShallowEnsembleModel(nn.Module):
 
         if self.force_variance:
             if not self.chunk_size:
-                forces_ens = -jax.jacrev(energy_fn)(R, Z, neighbor, box, offsets)
+                forces_ens = -jax.jacrev(energy_fn)(
+                    R, Z, neighbor, box, offsets, deterministic=deterministic
+                )
             else:
                 with jax.ensure_compile_time_eval():
                     if not n_ens % self.chunk_size == 0:
@@ -245,7 +262,9 @@ class ShallowEnsembleModel(nn.Module):
                 for _ in range(n_ens // self.chunk_size):
                     end = start + self.chunk_size
                     jac_i_fn = make_member_chunk_jac(energy_fn, start, end)
-                    force_i = -jac_i_fn(R, Z, neighbor, box, offsets)
+                    force_i = -jac_i_fn(
+                        R, Z, neighbor, box, offsets, deterministic=deterministic
+                    )
                     forces_ens.append(force_i)
                     start = end
 
@@ -263,12 +282,20 @@ class ShallowEnsembleModel(nn.Module):
             prediction["forces_ensemble"] = forces_ens  # n_atoms x 3 x n_members
 
         else:
-            forces_mean = -jax.grad(mean_energy_fn)(R, Z, neighbor, box, offsets)
+            forces_mean = -jax.grad(mean_energy_fn)(
+                R, Z, neighbor, box, offsets, deterministic=deterministic
+            )
             prediction["forces"] = forces_mean
 
         if self.calc_stress:
             stress = stress_times_vol(
-                mean_energy_fn, R, box, Z=Z, neighbor=neighbor, offsets=offsets
+                mean_energy_fn,
+                R,
+                box,
+                Z=Z,
+                neighbor=neighbor,
+                offsets=offsets,
+                deterministic=deterministic,
             )
             prediction["stress"] = stress
 

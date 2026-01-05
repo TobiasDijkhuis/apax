@@ -71,6 +71,7 @@ def build_energy_neighbor_fns(atoms, config, params, dr_threshold, neigbor_from_
     )
 
     energy_fn = maybe_vmap(model.apply, params)
+    energy_fn = partial(energy_fn, deterministic=True)
     return energy_fn, neighbor_fn
 
 

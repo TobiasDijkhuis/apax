@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 import numpy as np
 
@@ -81,7 +82,11 @@ class ModelBuilder:
         raise NotImplementedError("use a subclass to facilitate this")
 
     def build_readout(
-        self, head_config, is_feature_fn=False, only_use_n_layers: None | int = None
+        self,
+        head_config,
+        is_feature_fn=False,
+        only_use_n_layers: None | int = None,
+        deterministic: Optional[bool] = None,
     ):
         has_ensemble = "ensemble" in head_config.keys() and head_config["ensemble"]
         if has_ensemble and head_config["ensemble"]["kind"] == "shallow":
@@ -112,6 +117,8 @@ class ModelBuilder:
             is_feature_fn=is_feature_fn,
             n_shallow_ensemble=n_shallow_ensemble,
             dtype=dtype,
+            dropout_rate=head_config["dropout_rate"],
+            deterministic=deterministic,
         )
         return readout
 
@@ -159,11 +166,12 @@ class ModelBuilder:
         apply_mask=True,
         init_box: np.array = np.array([0.0, 0.0, 0.0]),
         inference_disp_fn=None,
+        deterministic: Optional[bool] = None,
     ):
         log.debug("Building atomistic model")
 
         descriptor = self.build_descriptor(apply_mask)
-        readout = self.build_readout(self.config)
+        readout = self.build_readout(self.config, deterministic=deterministic)
         scale_shift = self.build_scale_shift(scale, shift)
 
         property_heads = self.build_property_heads(apply_mask=apply_mask)
@@ -187,6 +195,7 @@ class ModelBuilder:
         apply_mask=True,
         init_box: np.array = np.array([0.0, 0.0, 0.0]),
         inference_disp_fn=None,
+        deterministic: Optional[bool] = None,
     ):
         energy_model = self.build_energy_model(
             scale,
@@ -194,6 +203,7 @@ class ModelBuilder:
             apply_mask,
             init_box=init_box,
             inference_disp_fn=inference_disp_fn,
+            deterministic=deterministic,
         )
         if (
             self.config["ensemble"]

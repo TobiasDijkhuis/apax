@@ -8,14 +8,13 @@ import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 from clu import metrics
-from flax.training.train_state import TrainState
 from jax import tree_util
 from jax.experimental import mesh_utils
 from jax.sharding import PositionalSharding
 from tqdm import trange
 
 from apax.data.input_pipeline import InMemoryDataset
-from apax.train.checkpoints import load_state
+from apax.train.checkpoints import TrainState, load_state
 from apax.train.parameters import EMAParameters
 
 log = logging.getLogger(__name__)
@@ -37,6 +36,7 @@ def fit(
     val_ds: Optional[InMemoryDataset] = None,
     patience: Optional[int] = None,
     patience_min_delta: float = 0.0,
+    dropout_rate: float = 0.0,
     disable_pbar: bool = False,
     disable_batch_pbar: bool = True,
     is_ensemble=False,
@@ -68,6 +68,10 @@ def fit(
         Validation dataset.
     patience : int, default = None
         Patience for early stopping.
+    patience_min_delta : float, default = 0.0
+        TODO: Docstring here
+    dropout_rate : float, default = 0.0
+        Rate for nodes to drop out
     disable_pbar : bool, default = False
         Whether to disable progress bar for epochs..
     disable_batch_pbar : bool, default = True
@@ -86,7 +90,7 @@ def fit(
 
     options = ocp.CheckpointManagerOptions(max_to_keep=2, save_interval_steps=1)
 
-    train_step, val_step = make_step_fns(
+    train_step, eval_step, val_step = make_step_fns(
         loss_fn, Metrics, model=state.apply_fn, is_ensemble=is_ensemble
     )
 
@@ -133,8 +137,31 @@ def fit(
                 if ema_handler:
                     ema_handler.update(state.params, epoch)
 
-                epoch_loss.update({"train_loss": 0.0})
-                train_batch_metrics = Metrics.empty()
+                batch_pbar = trange(
+                    0,
+                    train_steps_per_epoch,
+                    desc="Batches",
+                    ncols=100,
+                    mininterval=1.0,
+                    disable=disable_batch_pbar,
+                    leave=False,
+                )
+
+                dropout_step_key = jax.random.fold_in(key=state.key, data=state.step)
+                for batch_idx in range(train_steps_per_epoch):
+                    callbacks.on_train_batch_begin(batch=batch_idx)
+
+                    batch = next(batch_train_ds)
+                    state = train_step(state, batch, dropout_step_key)
+
+                    callbacks.on_train_batch_end(batch=batch_idx)
+                    batch_pbar.update()
+
+                if ema_handler:
+                    ema_handler.update(state.params, epoch)
+                    val_params = ema_handler.ema_params
+                else:
+                    val_params = state.params
 
                 batch_pbar = trange(
                     0,
@@ -146,20 +173,15 @@ def fit(
                     leave=False,
                 )
 
+                epoch_loss.update({"train_loss": 0.0})
+                eval_batch_metrics = Metrics.empty()
+
                 for batch_idx in range(train_steps_per_epoch):
-                    callbacks.on_train_batch_begin(batch=batch_idx)
-
                     batch = next(batch_train_ds)
-                    (
-                        (state, train_batch_metrics),
-                        batch_loss,
-                    ) = train_step(
-                        (state, train_batch_metrics),
-                        batch,
+                    batch_loss, eval_batch_metrics = eval_step(
+                        val_params, batch, eval_batch_metrics
                     )
-
                     epoch_loss["train_loss"] += jnp.mean(batch_loss)
-                    callbacks.on_train_batch_end(batch=batch_idx)
                     batch_pbar.update()
 
                 epoch_loss["train_loss"] /= train_steps_per_epoch
@@ -167,14 +189,8 @@ def fit(
 
                 epoch_metrics = {
                     f"train_{key}": float(val)
-                    for key, val in train_batch_metrics.compute().items()
+                    for key, val in eval_batch_metrics.compute().items()
                 }
-
-                if ema_handler:
-                    ema_handler.update(state.params, epoch)
-                    val_params = ema_handler.ema_params
-                else:
-                    val_params = state.params
 
                 if val_ds is not None:
                     epoch_loss.update({"val_loss": 0.0})
@@ -247,7 +263,15 @@ def fit(
         val_ds.cleanup()
 
 
-def calc_loss(params, inputs, labels, loss_fn, model):
+def calc_loss(
+    params,
+    inputs,
+    labels,
+    loss_fn,
+    model,
+    deterministic: Optional[bool] = None,
+    dropout_key: Optional[int] = None,
+):
     R, Z, idx, box, offsets = (
         inputs["positions"],
         inputs["numbers"],
@@ -255,32 +279,46 @@ def calc_loss(params, inputs, labels, loss_fn, model):
         inputs["box"],
         inputs["offsets"],
     )
-    predictions = model(params, R, Z, idx, box, offsets)
+    predictions = model(
+        params,
+        R,
+        Z,
+        idx,
+        box,
+        offsets,
+        deterministic=deterministic,
+        rngs={"dropout": dropout_key},
+    )
     loss = loss_fn(inputs, predictions, labels)
     return loss, predictions
 
 
 def make_ensemble_update(update_fn: Callable) -> Callable:
     # vmap over train state
-    v_update_fn = jax.vmap(update_fn, (0, None, None), (0, 0, 0))
+    v_update_fn = jax.vmap(update_fn, (0, None, None, None, None), (0, 0, 0, 0, 0))
 
-    def ensemble_update_fn(state, inputs, labels):
-        loss, predictions, state = v_update_fn(state, inputs, labels)
+    def ensemble_update_fn(
+        state,
+        inputs,
+        labels,
+        deterministic: Optional[bool] = None,
+        dropout_key: Optional[int] = None,
+    ):
+        state = v_update_fn(
+            state, inputs, labels, deterministic=deterministic, dropout_key=dropout_key
+        )
 
-        mean_predictions = tree_util.tree_map(lambda x: jnp.mean(x, axis=0), predictions)
-        mean_loss = jnp.mean(loss)
-        # Should we add std to predictions?
-        return mean_loss, mean_predictions, state
+        return state
 
     return ensemble_update_fn
 
 
 def make_ensemble_eval(update_fn: Callable) -> Callable:
     # vmap over train state
-    v_update_fn = jax.vmap(update_fn, (0, None, None), (0, 0))
+    v_update_fn = jax.vmap(update_fn, (0, None, None, None, None), (0, 0, 0, 0))
 
     def ensemble_eval_fn(state, inputs, labels):
-        loss, predictions = v_update_fn(state, inputs, labels)
+        loss, predictions = v_update_fn(state, inputs, labels, deterministic=True)
 
         mean_predictions = tree_util.tree_map(lambda x: jnp.mean(x, axis=0), predictions)
         mean_loss = jnp.mean(loss)
@@ -291,12 +329,18 @@ def make_ensemble_eval(update_fn: Callable) -> Callable:
 
 def make_step_fns(loss_fn, Metrics, model, is_ensemble):
     loss_calculator = partial(calc_loss, loss_fn=loss_fn, model=model)
-    grad_fn = jax.value_and_grad(loss_calculator, 0, has_aux=True)
+    grad_fn = jax.grad(loss_calculator, 0, has_aux=True)
 
-    def update_step(state, inputs, labels):
-        (loss, predictions), grads = grad_fn(state.params, inputs, labels)
+    def update_step(state, inputs, labels, dropout_step_key):
+        grads = grad_fn(
+            state.params,
+            inputs,
+            labels,
+            deterministic=False,
+            dropout_key=dropout_step_key,
+        )
         state = state.apply_gradients(grads=grads)
-        return loss, predictions, state
+        return state
 
     if is_ensemble:
         update_fn = make_ensemble_update(update_step)
@@ -306,23 +350,15 @@ def make_step_fns(loss_fn, Metrics, model, is_ensemble):
         eval_fn = loss_calculator
 
     @jax.jit
-    def train_step(carry, batch):
-        state, batch_metrics = carry
+    def train_step(state, batch, dropout_step_key):
         inputs, labels = batch
-        loss, predictions, state = update_fn(state, inputs, labels)
-
-        new_batch_metrics = Metrics.single_from_model_output(
-            inputs=inputs, label=labels, prediction=predictions
-        )
-        batch_metrics = batch_metrics.merge(new_batch_metrics)
-
-        new_carry = (state, batch_metrics)
-        return new_carry, loss
+        state = update_fn(state, inputs, labels, dropout_step_key)
+        return state
 
     @jax.jit
-    def val_step(params, batch, batch_metrics):
+    def eval_step(params, batch, batch_metrics):
         inputs, labels = batch
-        loss, predictions = eval_fn(params, inputs, labels)
+        loss, predictions = eval_fn(params, inputs, labels, deterministic=True)
 
         new_batch_metrics = Metrics.single_from_model_output(
             inputs=inputs, label=labels, prediction=predictions
@@ -330,4 +366,15 @@ def make_step_fns(loss_fn, Metrics, model, is_ensemble):
         batch_metrics = batch_metrics.merge(new_batch_metrics)
         return loss, batch_metrics
 
-    return train_step, val_step
+    @jax.jit
+    def val_step(params, batch, batch_metrics):
+        inputs, labels = batch
+        loss, predictions = eval_fn(params, inputs, labels, deterministic=True)
+
+        new_batch_metrics = Metrics.single_from_model_output(
+            inputs=inputs, label=labels, prediction=predictions
+        )
+        batch_metrics = batch_metrics.merge(new_batch_metrics)
+        return loss, batch_metrics
+
+    return train_step, eval_step, val_step

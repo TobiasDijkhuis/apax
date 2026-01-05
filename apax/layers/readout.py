@@ -1,5 +1,5 @@
 from dataclasses import field
-from typing import Any, Callable, List
+from typing import Any, Callable, List, Optional
 
 import flax.linen as nn
 import jax.numpy as jnp
@@ -17,6 +17,8 @@ class AtomisticReadout(nn.Module):
     use_ntk: bool = True
     n_shallow_ensemble: int = 0
     is_feature_fn: bool = False
+    dropout_rate: float = 0.0
+    deterministic: Optional[bool] = None
     dtype: Any = jnp.float32
 
     def setup(self):
@@ -42,9 +44,24 @@ class AtomisticReadout(nn.Module):
             dense.append(layer)
             if ii < len(units) - 1:
                 dense.append(swish)
-        self.sequential = nn.Sequential(dense, name="readout")
 
-    def __call__(self, x):
-        h = self.sequential(x)
+        #     dense[-1] = nn.Dropout(rate=self.dropout_rate)(
+        #          dense[-1], deterministic=deterministic
+        #     )
+        self.dense = dense
+        # self.sequential = nn.Sequential(dense, name="readout")
+
+    def __call__(self, x, deterministic: Optional[bool] = None):
+        # https://flax-linen.readthedocs.io/en/latest/guides/flax_fundamentals/arguments.html
+        deterministic = nn.merge_param("deterministic", self.deterministic, deterministic)
+
+        dense_dropout = self.dense.copy()
+        for ii, layer in enumerate(self.dense):
+            if ii % 2 == 0:
+                continue
+            dense_dropout[ii] = nn.Dropout(rate=self.dropout_rate)(
+                layer, deterministic=deterministic
+            )
+        h = nn.Sequential(dense_dropout, name="readout")(x)
         # TODO should we move aggregation here?
         return h
