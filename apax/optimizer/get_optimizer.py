@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from flax import traverse_util
+from flax import nnx
 from flax.core.frozen_dict import freeze
 from optax._src import base
 
@@ -103,7 +104,7 @@ def get_opt(
     name: str = "adam",
     kwargs: dict = {},
     schedule: dict = {},
-) -> optax._src.base.GradientTransformation:
+) -> optax.GradientTransformation:
     """
     Builds an optimizer with different learning rates for each parameter group.
     Several `optax` optimizers are supported.

@@ -18,6 +18,7 @@ from apax.train.parameters import EMAParameters
 from apax.train.trainer import fit
 from apax.transfer_learning import transfer_parameters
 from apax.utils.random import seed_py_np_tf
+from flax import nnx
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ def setup_logging(log_file, log_level):
 
     logging.getLogger("absl").setLevel(logging.WARNING)
 
-    logging.basicConfig(
+    lmgging.basicConfig(
         level=log_levels[log_level],
         format="%(levelname)s | %(asctime)s | %(message)s",
         datefmt="%H:%M:%S",
@@ -176,10 +177,11 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
         training config full example can be find :ref:`here <train_config>`:
 
     """
-    config = parse_config(user_config)
+    config: Config = parse_config(user_config)
 
     seed_py_np_tf(config.seed)
-    rng_key = jax.random.PRNGKey(config.seed)
+    # rng_key = jax.random.PRNGKey(config.seed)
+    rngs = nnx.Rngs(config.seed)
 
     config.data.model_version_path.mkdir(parents=True, exist_ok=True)
     setup_logging(config.data.model_version_path / "train.log", log_level)
@@ -188,26 +190,28 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
 
     callbacks = initialize_callbacks(config, config.data.model_version_path)
     loss_fn = initialize_loss_fn(config.loss)
-    Metrics = initialize_metrics(config.metrics)
+    metrics = initialize_metrics(config.metrics)
 
     train_ds, val_ds, ds_stats = initialize_datasets(config)
 
     sample_input, init_box = train_ds.init_input()
     Builder = config.model.get_builder()
     builder = Builder(config.model.model_dump())
-    model = builder.build_energy_derivative_model(
+    Model = builder.build_energy_derivative_model(
         scale=ds_stats.elemental_scale,
         shift=ds_stats.elemental_shift,
         apply_mask=True,
         init_box=init_box,
-    )
-    batched_model = jax.vmap(model.apply, in_axes=(None, 0, 0, 0, 0, 0))
+    )  # TODO: somehow change this such that it returns the uninitialized module.
 
     if config.model.ensemble and config.model.ensemble.kind == "full":
         n_full_models = config.model.ensemble.n_members
     else:
         n_full_models = 1
-    params, rng_key = create_params(model, rng_key, sample_input, n_full_models)
+
+    bridge = nnx.bridge(Model, rngs=rngs).lazy_init(sample_input)
+    model = create_params(Model, sample_input, n_full_models, rngs=rngs)
+    batched_model = jax.vmap(model, in_axes=(None, 0, 0, 0, 0, 0))
 
     freeze_layers = []
     do_transfer_learning = config.transfer_learning is not None
@@ -224,7 +228,8 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
         **config.optimizer.model_dump(),
     )
 
-    state = create_train_state(batched_model, params, tx)
+    # state = create_train_state(batched_model, params, tx, rngs)
+    optimizer = nnx.Optimizer(batched_model, tx, wrt=nnx.Param)
 
     if do_transfer_learning:
         state = transfer_parameters(state, config.transfer_learning)
@@ -237,10 +242,11 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
         ema_handler = None
 
     fit(
-        state,
+        batched_model,
+        optimizer,
         train_ds,
         loss_fn,
-        Metrics,
+        metrics,
         callbacks,
         config.n_epochs,
         ckpt_dir=config.data.model_version_path,
@@ -253,5 +259,6 @@ def run(user_config: Union[str, os.PathLike, dict], log_level="error"):
         is_ensemble=n_full_models > 1,
         data_parallel=config.data_parallel,
         ema_handler=ema_handler,
+        rngs=rngs,
     )
     log.info("Finished training")

@@ -23,6 +23,7 @@ from apax.utils.convert import (
     transpose_dict_of_lists,
     unit_dict,
 )
+from ase import Atoms
 
 log = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ def pad_nl(idx, offsets, max_neighbors):
     return idx, offsets
 
 
-def find_largest_system(inputs, r_max) -> tuple[int]:
+def find_largest_system(inputs: dict, r_max: float) -> tuple[int, int]:
     """
     Finds the maximal number of atoms and neighbors.
 
@@ -64,7 +65,7 @@ def find_largest_system(inputs, r_max) -> tuple[int]:
 
     Returns
     -------
-    Tuple[int]
+    Tuple[int, int]
         Tuple containing the maximum number of atoms and neighbors.
     """
     positions, boxes = inputs["positions"], inputs["box"]
@@ -84,10 +85,10 @@ class InMemoryDataset:
 
     def __init__(
         self,
-        atoms_list,
-        cutoff,
-        bs,
-        n_epochs,
+        atoms_list: list[Atoms],
+        cutoff: float,
+        bs: int,
+        n_epochs: int,
         pos_unit: str = "Ang",
         energy_unit: str = "eV",
         additional_properties: list[tuple] = [],
@@ -143,7 +144,7 @@ class InMemoryDataset:
             batch_size = self.n_data
         return batch_size
 
-    def prepare_data(self, i):
+    def prepare_data(self, i: int) -> tuple:
         inputs = {k: v[i] for k, v in self.inputs.items()}
         idx, offsets = compute_nl(inputs["positions"], inputs["box"], self.cutoff)
         inputs["idx"], inputs["offsets"] = pad_nl(idx, offsets, self.max_nbrs)
@@ -174,9 +175,9 @@ class InMemoryDataset:
         inputs = {k: tf.constant(v) for k, v in inputs.items()}
         labels = {k: tf.constant(v) for k, v in labels.items()}
 
-        return (inputs, labels)
+        return inputs, labels
 
-    def enqueue(self, num_elements):
+    def enqueue(self, num_elements: int) -> None:
         for _ in range(num_elements):
             data = self.prepare_data(self.count)
             self.buffer.append(data)
@@ -271,7 +272,7 @@ class CachedInMemoryDataset(InMemoryDataset):
                 space = self.n_data - self.count
             self.enqueue(space)
 
-    def shuffle_and_batch(self, sharding=None):
+    def shuffle_and_batch(self, sharding=None) -> Iterator[jax.Array]:
         """Shuffles and batches the inputs/labels. This function prepares the
         inputs and labels for the whole training and prefetches the data.
 
@@ -306,7 +307,7 @@ class CachedInMemoryDataset(InMemoryDataset):
         ds = prefetch_to_single_device(ds.as_numpy_iterator(), 2, sharding)
         return ds
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         for p in self.file.parent.glob(f"{self.file.name}.data*"):
             p.unlink()
 
@@ -336,7 +337,7 @@ class OTFInMemoryDataset(InMemoryDataset):
             self.enqueue(space)
             outer_count += 1
 
-    def shuffle_and_batch(self, sharding=None):
+    def shuffle_and_batch(self, sharding=None) -> Iterator[jax.Array]:
         """Shuffles and batches the inputs/labels. This function prepares the
         inputs and labels for the whole training and prefetches the data.
 
@@ -364,11 +365,11 @@ class OTFInMemoryDataset(InMemoryDataset):
         return ds
 
 
-def next_power_of_two(x):
+def next_power_of_two(x: float | int) -> int:
     return 1 << (int(x) - 1).bit_length()
 
 
-def round_up_to_multiple(value, multiple):
+def round_up_to_multiple(value: int, multiple: int) -> int:
     """
     Rounds up the given integer `value` to the next multiple of `multiple`.
 
@@ -385,12 +386,12 @@ def round_up_to_multiple(value, multiple):
 class BatchProcessor:
     def __init__(
         self,
-        cutoff,
+        cutoff: float,
         atom_padding: int,
         nl_padding: int,
-        forces=True,
-        stress=False,
-        additional_properties=[],
+        forces: bool = True,
+        stress: bool = False,
+        additional_properties: list[tuple[str, tuple]] = [],
     ) -> None:
         self.cutoff = cutoff
         self.atom_padding = atom_padding
@@ -486,10 +487,10 @@ class PerBatchPaddedDataset(InMemoryDataset):
 
     def __init__(
         self,
-        atoms_list,
-        cutoff,
-        bs,
-        n_epochs,
+        atoms_list: list[Atoms],
+        cutoff: float,
+        bs: int,
+        n_epochs: int,
         num_workers: Optional[int] = None,
         atom_padding: int = 10,
         nl_padding: int = 2000,
@@ -544,7 +545,7 @@ class PerBatchPaddedDataset(InMemoryDataset):
         self.enqueue_future = None
         self.needs_data = Event()
 
-    def enqueue_batches(self):
+    def enqueue_batches(self) -> None:
         """Function to enqueue batches on a side thread."""
         while self.count < self.steps_per_epoch() * self.n_epochs:
             self.needs_data.wait()
@@ -558,7 +559,7 @@ class PerBatchPaddedDataset(InMemoryDataset):
                 self.enqueue(num_batches)
             self.needs_data.clear()  # Reset event
 
-    def enqueue(self, num_batches):
+    def enqueue(self, num_batches: int) -> None:
         start = self.count * self.batch_size
 
         # Split data into chunks and submit tasks to the process pool
@@ -601,7 +602,7 @@ class PerBatchPaddedDataset(InMemoryDataset):
             self.needs_data.set()
             self.enqueue_future.result()
 
-    def shuffle_and_batch(self, sharding):
+    def shuffle_and_batch(self, sharding) -> Iterator[jax.Array]:
         self.should_shuffle = True
         ds = prefetch_to_single_device(iter(self), 2, sharding)
         return ds
@@ -614,7 +615,7 @@ class PerBatchPaddedDataset(InMemoryDataset):
     def make_signature(self) -> None:
         pass
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         self.epoch_finished = True
         self.needs_data.set()
         self.enqueue_future.result()

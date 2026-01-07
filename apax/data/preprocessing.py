@@ -11,7 +11,9 @@ from vesin import NeighborList
 log = logging.getLogger(__name__)
 
 
-def compute_nl(positions, box, r_max):
+def compute_nl(
+    positions: np.ndarray, box: np.ndarray, r_max: float
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Computes the neighbor list for a single structure.
     For periodic systems, positions are assumed to be in
@@ -55,7 +57,7 @@ def compute_nl(positions, box, r_max):
     return neighbor_idxs, offsets
 
 
-def get_shrink_wrapped_cell(positions):
+def get_shrink_wrapped_cell(positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
     Get the shrink-wrapped simulation cell based on atomic positions.
 

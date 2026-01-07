@@ -7,20 +7,26 @@ import jax
 import numpy as np
 from tqdm import trange
 
+from flax import nnx
 from apax.config import parse_config
 from apax.data.input_pipeline import OTFInMemoryDataset
-from apax.train.callbacks import initialize_callbacks
+from apax.train.callbacks import initialize_callbacks, CallbackCollection
 from apax.train.checkpoints import restore_single_parameters
 from apax.train.metrics import initialize_metrics
 from apax.train.run import initialize_loss_fn, setup_logging
 from apax.train.trainer import make_step_fns
 from apax.utils.data import load_data, split_atoms
 from apax.utils.random import seed_py_np_tf
+from clu.metrics import Collection as MetricsCollection
+from apax.config.train_config import Config
+from ase import Atoms
 
 log = logging.getLogger(__name__)
 
 
-def get_test_idxs(atoms_list, used_idxs, n_test=-1):
+def get_test_idxs(
+    atoms_list: list[Atoms], used_idxs: list[int], n_test: int = -1
+) -> list[int]:
     idxs = np.arange(len(atoms_list))
     test_idxs = np.setdiff1d(idxs, used_idxs)
     np.random.shuffle(test_idxs)
@@ -31,8 +37,11 @@ def get_test_idxs(atoms_list, used_idxs, n_test=-1):
 
 
 def load_test_data(
-    config, model_version_path, eval_path, n_test=-1
-):  # TODO double code run.py in progress
+    config: Config,
+    model_version_path: str | Path,
+    eval_path: str | Path,
+    n_test: int = -1,
+) -> list[Atoms]:  # TODO double code run.py in progress
     """
     Load test data for evaluation.
 
@@ -85,7 +94,14 @@ def load_test_data(
     return atoms_list
 
 
-def predict(model, params, Metrics, loss_fn, test_ds, callbacks, is_ensemble=False):
+def predict(
+    model: nnx.Module,
+    metrics: MetricsCollection,
+    loss_fn: Callable,
+    test_ds: OTFInMemoryDataset,
+    callbacks: CallbackCollection,
+    is_ensemble: bool = False,
+) -> None:
     """
     Perform predictions on the test dataset.
 
@@ -108,17 +124,20 @@ def predict(model, params, Metrics, loss_fn, test_ds, callbacks, is_ensemble=Fal
     """
 
     callbacks.on_train_begin()
+
     _, test_step_fn = make_step_fns(
-        loss_fn, Metrics, model=model, is_ensemble=is_ensemble
-    )
+        loss_fn, metrics, model=model, is_ensemble=is_ensemble, rngs=nnx.Rngs()
+    )  # TODO: Do I need to pass the seed to this? It should be deterministic so probably not.
+    model.eval()
 
     batch_test_ds = test_ds.batch()
 
-    test_metrics = Metrics.empty()
+    test_metrics = metrics.empty()
 
     batch_pbar = trange(
         0, test_ds.n_data, desc="Structure", ncols=100, disable=False, leave=True
     )
+
     for batch_idx in range(test_ds.n_data):
         batch = next(batch_test_ds)
         batch_start_time = time.time()
@@ -139,7 +158,12 @@ def predict(model, params, Metrics, loss_fn, test_ds, callbacks, is_ensemble=Fal
     callbacks.on_train_end()
 
 
-def eval_model(config_path, n_test=-1, log_file="eval.log", log_level="error"):
+def eval_model(
+    config_path: str | Path,
+    n_test: int = -1,
+    log_file: str | Path = "eval.log",
+    log_level: str = "error",
+) -> None:
     """
     Evaluate the model using the provided configuration.
 
@@ -166,7 +190,7 @@ def eval_model(config_path, n_test=-1, log_file="eval.log", log_level="error"):
 
     callbacks = initialize_callbacks(config, eval_path)
     loss_fn = initialize_loss_fn(config.loss)
-    Metrics = initialize_metrics(config.metrics)
+    metrics = initialize_metrics(config.metrics)
 
     atoms_list = load_test_data(config, model_version_path, eval_path, n_test)
     test_ds = OTFInMemoryDataset(
@@ -187,18 +211,20 @@ def eval_model(config_path, n_test=-1, log_file="eval.log", log_level="error"):
 
     Builder = config.model.get_builder()
     builder = Builder(config.model.model_dump(), n_species=119)
-    model = builder.build_energy_derivative_model(
+    Model = builder.build_energy_derivative_model(
         apply_mask=True,
         init_box=init_box,
     )
 
-    model = jax.vmap(model.apply, in_axes=(None, 0, 0, 0, 0, 0))
+    # TODO: Initialize the model
+    model = Model(...)
+
+    model = jax.vmap(model, in_axes=(None, 0, 0, 0, 0, 0))
     config, params = restore_single_parameters(model_version_path)
 
     predict(
         model,
-        params,
-        Metrics,
+        metrics,
         loss_fn,
         test_ds,
         callbacks,

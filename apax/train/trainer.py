@@ -7,16 +7,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
-from clu import metrics
-from flax.training.train_state import TrainState
+from clu.metrics import Collection as MetricsCollection
 from jax import tree_util
 from jax.experimental import mesh_utils
+from flax import nnx
 from jax.sharding import PositionalSharding
 from tqdm import trange
 
 from apax.data.input_pipeline import InMemoryDataset
-from apax.train.checkpoints import load_state
+from apax.train.checkpoints import load_state, TrainState
 from apax.train.parameters import EMAParameters
+from apax.train.callbacks import CallbackCollection
 
 log = logging.getLogger(__name__)
 
@@ -26,11 +27,12 @@ class EarlyStop(Exception):
 
 
 def fit(
-    state: TrainState,
+    model: nnx.Module,
+    optimizer: nnx.Optimizer,
     train_ds: InMemoryDataset,
     loss_fn,
-    Metrics: metrics.Collection,
-    callbacks: list,
+    metrics: MetricsCollection,
+    callbacks: CallbackCollection,
     n_epochs: int,
     ckpt_dir,
     ckpt_interval: int = 1,
@@ -42,21 +44,22 @@ def fit(
     is_ensemble=False,
     data_parallel=True,
     ema_handler: Optional[EMAParameters] = None,
+    rngs: Optional[nnx.Rngs] = None,  # TODO: Do I ever need this?
 ):
     """
     Trains the model using the provided training dataset.
 
     Parameters
     ----------
-    state :
+    state : TrainState
         The initial state of the model.
     train_ds : InMemoryDataset
         The training dataset.
     loss_fn :
         The loss function to be minimized.
-    Metrics metrics.Collection :
+    metrics : MetricsCollection
         Collection of metrics to evaluate during training.
-    callbacks : list
+    callbacks : CallbackCollection
         List of callback functions to be executed during training.
     n_epochs : int
         Number of epochs for training.
@@ -76,6 +79,7 @@ def fit(
         Whether the model is an ensemble.
     data_parallel : bool, default = True
         Whether to use data parallelism.
+    rngs : nnx.Rngs, default = None
     """
 
     log.info("Beginning Training")
@@ -85,9 +89,8 @@ def fit(
     best_dir = ckpt_dir / "best"
 
     options = ocp.CheckpointManagerOptions(max_to_keep=2, save_interval_steps=1)
-
     train_step, val_step = make_step_fns(
-        loss_fn, Metrics, model=state.apply_fn, is_ensemble=is_ensemble
+        loss_fn, metrics, model=model, rngs=rngs, is_ensemble=is_ensemble
     )
 
     state, start_epoch = load_state(state, latest_dir)
@@ -120,10 +123,12 @@ def fit(
     try:
         with (
             ocp.CheckpointManager(
-                latest_dir.resolve(), options=options
+                latest_dir.resolve(),
+                options=options,
             ) as latest_ckpt_manager,
             ocp.CheckpointManager(
-                best_dir.resolve(), options=options
+                best_dir.resolve(),
+                options=options,
             ) as best_ckpt_manager,
         ):
             for epoch in range(start_epoch, n_epochs):
@@ -131,10 +136,10 @@ def fit(
                 callbacks.on_epoch_begin(epoch=epoch + 1)
 
                 if ema_handler:
-                    ema_handler.update(state.params, epoch)
+                    ema_handler.update(model.params, epoch)
 
                 epoch_loss.update({"train_loss": 0.0})
-                train_batch_metrics = Metrics.empty()
+                train_batch_metrics = metrics.empty()
 
                 batch_pbar = trange(
                     0,
@@ -146,15 +151,15 @@ def fit(
                     leave=False,
                 )
 
+                model.train()  # Set model to train (not deterministic)
                 for batch_idx in range(train_steps_per_epoch):
                     callbacks.on_train_batch_begin(batch=batch_idx)
 
                     batch = next(batch_train_ds)
-                    (
-                        (state, train_batch_metrics),
-                        batch_loss,
-                    ) = train_step(
-                        (state, train_batch_metrics),
+                    train_batch_metrics, batch_loss = train_step(
+                        model,
+                        optimizer,
+                        train_batch_metrics,
                         batch,
                     )
 
@@ -171,14 +176,15 @@ def fit(
                 }
 
                 if ema_handler:
-                    ema_handler.update(state.params, epoch)
+                    ema_handler.update(model.params, epoch)
                     val_params = ema_handler.ema_params
                 else:
-                    val_params = state.params
+                    val_params = model.params
 
                 if val_ds is not None:
+                    model.eval()  # Set model to eval (deterministic)
                     epoch_loss.update({"val_loss": 0.0})
-                    val_batch_metrics = Metrics.empty()
+                    val_batch_metrics = metrics.empty()
 
                     batch_pbar = trange(
                         0,
@@ -193,7 +199,7 @@ def fit(
                         batch = next(batch_val_ds)
 
                         batch_loss, val_batch_metrics = val_step(
-                            val_params, batch, val_batch_metrics
+                            model, batch, val_batch_metrics
                         )
                         epoch_loss["val_loss"] += batch_loss
                         batch_pbar.update()
@@ -212,7 +218,7 @@ def fit(
                 epoch_end_time = time.time()
                 epoch_metrics.update({"epoch_time": epoch_end_time - epoch_start_time})
 
-                ckpt = {"model": state, "epoch": epoch}
+                ckpt = {"model": model, "epoch": epoch}
                 if epoch % ckpt_interval == 0:
                     latest_ckpt_manager.save(epoch, args=ocp.args.StandardSave(ckpt))
 
@@ -247,7 +253,9 @@ def fit(
         val_ds.cleanup()
 
 
-def calc_loss(params, inputs, labels, loss_fn, model):
+def calc_loss(
+    model: nnx.Module, rngs: nnx.Rngs, inputs, labels, loss_fn: Callable
+) -> tuple[float, jax.Array]:
     R, Z, idx, box, offsets = (
         inputs["positions"],
         inputs["numbers"],
@@ -255,7 +263,7 @@ def calc_loss(params, inputs, labels, loss_fn, model):
         inputs["box"],
         inputs["offsets"],
     )
-    predictions = model(params, R, Z, idx, box, offsets)
+    predictions = model(R, Z, idx, box, offsets, rngs)
     loss = loss_fn(inputs, predictions, labels)
     return loss, predictions
 
@@ -264,23 +272,23 @@ def make_ensemble_update(update_fn: Callable) -> Callable:
     # vmap over train state
     v_update_fn = jax.vmap(update_fn, (0, None, None), (0, 0, 0))
 
-    def ensemble_update_fn(state, inputs, labels):
-        loss, predictions, state = v_update_fn(state, inputs, labels)
+    def ensemble_update_fn(model: nnx.Module, optimizer: nnx.Optimizer, inputs, labels):
+        loss, predictions = v_update_fn(model, inputs, labels)
 
         mean_predictions = tree_util.tree_map(lambda x: jnp.mean(x, axis=0), predictions)
         mean_loss = jnp.mean(loss)
         # Should we add std to predictions?
-        return mean_loss, mean_predictions, state
+        return mean_loss, mean_predictions
 
     return ensemble_update_fn
 
 
-def make_ensemble_eval(update_fn: Callable) -> Callable:
+def make_ensemble_eval(eval_fn: Callable) -> Callable:
     # vmap over train state
     v_update_fn = jax.vmap(update_fn, (0, None, None), (0, 0))
 
-    def ensemble_eval_fn(state, inputs, labels):
-        loss, predictions = v_update_fn(state, inputs, labels)
+    def ensemble_eval_fn(model: nnx.Module, inputs, labels):
+        loss, predictions = eval_fn(model, inputs, labels)
 
         mean_predictions = tree_util.tree_map(lambda x: jnp.mean(x, axis=0), predictions)
         mean_loss = jnp.mean(loss)
@@ -289,14 +297,20 @@ def make_ensemble_eval(update_fn: Callable) -> Callable:
     return ensemble_eval_fn
 
 
-def make_step_fns(loss_fn, Metrics, model, is_ensemble):
-    loss_calculator = partial(calc_loss, loss_fn=loss_fn, model=model)
-    grad_fn = jax.value_and_grad(loss_calculator, 0, has_aux=True)
+def make_step_fns(
+    loss_fn: Callable,
+    metrics: MetricsCollection,
+    model: nnx.Module,
+    rngs: nnx.Rngs,
+    is_ensemble: bool,
+):
+    loss_calculator = partial(calc_loss, rngs=rngs, loss_fn=loss_fn)
+    grad_fn = nnx.value_and_grad(loss_calculator, has_aux=True)
 
-    def update_step(state, inputs, labels):
-        (loss, predictions), grads = grad_fn(state.params, inputs, labels)
-        state = state.apply_gradients(grads=grads)
-        return loss, predictions, state
+    def update_step(model: nnx.Module, optimizer: nnx.Optimizer, inputs, labels):
+        (loss, predictions), grads = grad_fn(model, inputs, labels)
+        optimizer.update(model, grads)
+        return loss, predictions
 
     if is_ensemble:
         update_fn = make_ensemble_update(update_step)
@@ -305,26 +319,31 @@ def make_step_fns(loss_fn, Metrics, model, is_ensemble):
         update_fn = update_step
         eval_fn = loss_calculator
 
-    @jax.jit
-    def train_step(carry, batch):
-        state, batch_metrics = carry
+    @nnx.jit
+    def train_step(
+        model: nnx.Module,
+        optimizer: nnx.Optimizer,
+        batch_metrics: MetricsCollection,
+        batch,
+    ) -> tuple[MetricsCollection, float]:
         inputs, labels = batch
-        loss, predictions, state = update_fn(state, inputs, labels)
+        loss, predictions = update_fn(model, optimizer, inputs, labels)
 
-        new_batch_metrics = Metrics.single_from_model_output(
+        new_batch_metrics = metrics.single_from_model_output(
             inputs=inputs, label=labels, prediction=predictions
         )
         batch_metrics = batch_metrics.merge(new_batch_metrics)
 
-        new_carry = (state, batch_metrics)
-        return new_carry, loss
+        return loss, batch_metrics
 
-    @jax.jit
-    def val_step(params, batch, batch_metrics):
+    @nnx.jit
+    def val_step(
+        model: nnx.Module, batch_metrics: MetricsCollection, batch
+    ) -> tuple[float, MetricsCollection]:
         inputs, labels = batch
-        loss, predictions = eval_fn(params, inputs, labels)
+        loss, predictions = eval_fn(model, inputs, labels)
 
-        new_batch_metrics = Metrics.single_from_model_output(
+        new_batch_metrics = metrics.single_from_model_output(
             inputs=inputs, label=labels, prediction=predictions
         )
         batch_metrics = batch_metrics.merge(new_batch_metrics)

@@ -1,13 +1,15 @@
 import logging
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Type
 
 import jax
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
 from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.training import train_state
+from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
+import optax
 
 from apax.config.common import parse_config
 from apax.config.train_config import Config
@@ -15,7 +17,7 @@ from apax.config.train_config import Config
 log = logging.getLogger(__name__)
 
 
-def check_for_ensemble(params: FrozenDict) -> int:
+def check_for_ensemble(params: nnx.State) -> int:
     """Checks if a set of parameters belongs to an ensemble model.
     This is the case if all parameters share the same first dimension (parameter batch)
     """
@@ -29,15 +31,16 @@ def check_for_ensemble(params: FrozenDict) -> int:
         return 1
 
 
-def create_train_state(model, params: FrozenDict, tx):
+def create_train_state(
+    graphdef: nnx.GraphDef,
+    params: nnx.State,
+    tx: optax.GradientTransformation,
+    rngs: nnx.Rngs,
+) -> TrainState:
     n_models = check_for_ensemble(params)
 
-    def create_single_train_state(params):
-        state = train_state.TrainState.create(
-            apply_fn=model,
-            params=params,
-            tx=tx,
-        )
+    def create_single_train_state(params: nnx.State) -> TrainState:
+        state = TrainState.create(graphdef=graphdef, params=params, tx=tx, rngs=rngs)
         return state
 
     if n_models > 1:
@@ -48,28 +51,24 @@ def create_train_state(model, params: FrozenDict, tx):
     return train_state_fn(params)
 
 
-def create_params(model, rng_key, sample_input: tuple, n_models: int):
-    keys = jax.random.split(rng_key, num=n_models + 1)
-    rng_key, model_rng = keys[0], keys[1:]
-
+def create_params(
+    Model: Type[nnx.Module], sample_input: tuple, n_models: int, rngs: nnx.Rngs
+) -> nnx.Module:  # Rename to create_model or initialize_model
     log.info(f"Initializing {n_models} model(s)")
-
     if n_models == 1:
-        params = model.init(model_rng[0], *sample_input)
+        model = Model(*sample_input, rngs=rngs)
     elif n_models > 1:
         num_args = len(sample_input)
         # vmap only over parameters, not over any data from the input
         in_axes = (0, *[None] * num_args)
-        params = jax.vmap(model.init, in_axes=in_axes)(model_rng, *sample_input)
+        model = jax.vmap(model, in_axes=in_axes)(*sample_input, rngs=rngs)
     else:
         raise ValueError(f"n_models should be a positive integer, found {n_models}")
 
-    params = freeze(params)
-
-    return params, rng_key
+    return model
 
 
-def load_state(state, ckpt_dir):
+def load_state(state: nnx.TrainState, ckpt_dir: str | Path) -> tuple[nnx.TrainState, int]:
     ckpt_dir = Path(ckpt_dir)
     start_epoch = 0
     target = {"model": state, "epoch": 0}

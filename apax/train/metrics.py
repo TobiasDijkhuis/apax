@@ -5,6 +5,7 @@ import jax.numpy as jnp
 from clu import metrics
 
 from apax.utils.math import normed_dotp
+from apax.config.train_config import MetricsConfig
 
 log = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ def make_single_metric(key: str, reduction: str) -> metrics.Average:
     return metric.from_fun(reduction_fn)
 
 
-def initialize_metrics(metrics_list) -> metrics.Collection:
+def initialize_metrics(metrics_list: list[MetricsConfig]) -> metrics.Collection:
     """
     Builds a `clu` metrics `Collection` by looping over all `keys` and `reductions`.
     the metrics are named according to `key_reduction`.

@@ -11,7 +11,7 @@ def tree_ema(tree1, tree2, alpha):
 
 class EMAParameters:
     """Handler for tracking an exponential moving average of model parameters.
-    The EMA parameters are used in the valitaion loop.
+    The EMA parameters are used in the validation loop.
 
     Parameters
     ----------
