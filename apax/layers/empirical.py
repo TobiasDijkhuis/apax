@@ -1,12 +1,14 @@
 from dataclasses import field
-from typing import Any
+from functools import partial
+from typing import Any, Optional
 
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
-from ase import data
-from jax import vmap
+from ase import Atoms, data
+from ase.calculators.calculator import Calculator
+from jax import custom_vjp, vmap
 
 from apax.layers.masking import mask_by_atom, mask_by_neighbor
 from apax.utils.convert import str_to_dtype
@@ -167,8 +169,69 @@ class LatentEwald(EmpiricalEnergyTerm):
         return E_lr
 
 
+def create_energy_fn(calculator: Calculator):
+    def base_energy_fn(R, Z) -> float:
+        atoms = Atoms(positions=R, numbers=Z)
+        energy = calculator.get_potential_energy(atoms=atoms)
+        return energy
+
+    def base_force_fn(R, Z) -> np.ndarray:  # , zeros_to_add: int) -> np.ndarray:
+        atoms = Atoms(positions=R, numbers=Z)
+        forces = calculator.get_forces(atoms=atoms)
+        return forces
+
+    @partial(custom_vjp, nondiff_argnums=(1,))
+    def energy_fn(R, Z):
+        return jax.pure_callback(base_energy_fn, jax.ShapeDtypeStruct((), float), R, Z)
+
+    def force_fn_fwd(R, Z):
+        energy = energy_fn(R, Z)
+        forces = jax.pure_callback(
+            base_force_fn, jax.ShapeDtypeStruct(R.shape, float), R, Z
+        )
+        return energy, (forces,)
+
+    def force_fn_bwd(Z, res, g):
+        return res
+
+    energy_fn.defvjp(force_fn_fwd, force_fn_bwd)
+
+    return energy_fn
+
+
+class DeltaMLBase(EmpiricalEnergyTerm):
+    """Base class to do Delta-ML."""
+
+    calculator: Optional[Calculator] = None
+
+    def setup(self):
+        if self.calculator is None:
+            raise AttributeError()
+
+        self.energy_fn = create_energy_fn(self.calculator)
+
+    def __call__(self, R, dr_vec, Z, idx, box, properties):
+        # n_nonpadded = jnp.count_nonzero(Z)
+
+        energy = self.energy_fn(R, Z)
+
+        # zeros_to_add = Z.shape[0] - n_nonpadded
+
+        # force_fn = (
+        #     jax.tree_util.Partial(
+        #         jax.pure_callback,
+        #         callback=self.base_force_fn,
+        #         result_shape_dtypes=jax.ShapeDtypeStruct(R.shape, float),
+        #         zeros_to_add=zeros_to_add,
+        #     ),
+        # )
+
+        return energy  # , force_fn
+
+
 all_corrections = {
     "zbl": ZBLRepulsion,
     "exponential": ExponentialRepulsion,
     "latent_ewald": LatentEwald,
+    "delta_ml": DeltaMLBase,
 }
