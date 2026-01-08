@@ -13,7 +13,7 @@ test_attribute_import_data = [
 
 
 @pytest.mark.parametrize(
-    "module_name, attribute_name, expected_type", test_attribute_import_data
+    "module_name, attribute_name, expected_object", test_attribute_import_data
 )
-def test_get_attribute_from_module(module_name, attribute_name, expected_type):
-    assert get_attr_from_module(module_name, attribute_name) == expected_type
+def test_get_attribute_from_module(module_name, attribute_name, expected_object):
+    assert get_attr_from_module(module_name, attribute_name) == expected_object
