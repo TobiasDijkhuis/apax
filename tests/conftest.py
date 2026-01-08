@@ -3,12 +3,14 @@ import random
 from typing import List
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import yaml
 from ase import Atoms
 from ase.calculators.emt import EMT
 from ase.calculators.singlepoint import SinglePointCalculator
+from ase.calculators.calculator import Calculator, all_changes
 
 from apax.config.train_config import Config
 from apax.train.run import run
@@ -166,3 +168,35 @@ def load_config_and_run_training(config_path, updated_config):
     config_dict = mod_config(config_path, updated_config)
     run(config_dict)
     return config_dict
+
+
+class DummyCalculator(Calculator):
+    implemented_properties = ["energy", "forces"]
+
+    def __init__(self, spring_constant: float = 1.0, **kwargs):
+        Calculator.__init__(self, **kwargs)
+        self.spring_constant = spring_constant
+
+    def calculate(
+        self, atoms: Atoms, properties: list[str] = ["energy"], system_changes=all_changes
+    ) -> None:
+        Calculator.calculate(
+            self, atoms=atoms, properties=properties, system_changes=system_changes
+        )
+
+        positions = atoms.get_positions()
+
+        def harmonic_potential(x1, x2) -> float:
+            return self.spring_constant * 0.5 * jnp.linalg.norm(x1 - x2) ** 2
+
+        energy, neg_force = jax.value_and_grad(harmonic_potential, argnums=(0, 1))(
+            positions[0], positions[1]
+        )
+
+        self.results["energy"] = energy
+        self.results["forces"] = -jnp.stack(neg_force)
+
+
+@pytest.fixture(scope="module", params=[1.0, 0.5, -1.0])
+def dummy_calculator(request):
+    return DummyCalculator(spring_constant=request.param)

@@ -1,5 +1,5 @@
 from dataclasses import field
-from typing import Any
+from typing import Any, Optional
 
 import flax.linen as nn
 import jax
@@ -188,19 +188,26 @@ class WrappedCalculator(EmpiricalEnergyTerm):
 
     calculator_name: str = ""
     calculator_kwargs: dict[str, Any] = field(default_factory=lambda: {})
+    calculator: Optional[Calculator] = None
 
     def setup(self):
-        if self.calculator_name == "":
-            raise ValueError
+        if self.calculator is not None:
+            # Having this option might throw an error, because a Calculator
+            # is not a valid jax type. However, I added it for easy testing,
+            # it might need to be removed.
+            if self.calculator_name != "":
+                raise ValueError()
+        else:
+            if self.calculator_name == "":
+                raise ValueError
+            split_calculator_name = self.calculator_name.split(".")
+            module_name = ".".join(split_calculator_name[:-1])
+            class_name = split_calculator_name[-1]
 
-        split_calculator_name = self.calculator_name.split(".")
-        module_name = ".".join(split_calculator_name[:-1])
-        class_name = split_calculator_name[-1]
+            CalculatorClass: Calculator = get_attr_from_module(module_name, class_name)
+            self.calculator = CalculatorClass(**self.calculator_kwargs)
 
-        CalculatorClass: Calculator = get_attr_from_module(module_name, class_name)
-        calculator = CalculatorClass(**self.calculator_kwargs)
-
-        self.energy_fn = create_energy_fn(calculator)
+        self.energy_fn = create_energy_fn(self.calculator)
 
     def __call__(self, R, dr_vec, Z, idx, box, properties) -> float:
         dtype = str_to_dtype(self.dtype)
