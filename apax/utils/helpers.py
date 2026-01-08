@@ -1,4 +1,6 @@
 import csv
+import importlib
+from typing import Any, Type
 
 import yaml
 
@@ -63,3 +65,17 @@ def load_csv_metrics(path):
                 data_dict[key].append(float(value))
 
     return data_dict
+
+
+def get_attr_from_module(module_name: str, attr_name: str) -> Type[Any]:
+    """Import a class from a module by their names
+
+    Args:
+        module_name (str): name of module, like 'numpy.linalg'
+        attr_name (str): name of attribute, like 'norm'
+
+    Returns:
+        Type[Any]: attribute
+    """
+    module = importlib.import_module(module_name)
+    return getattr(module, attr_name)

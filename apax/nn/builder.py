@@ -144,6 +144,7 @@ class ModelBuilder:
             correction = correction.copy()
             name = correction.pop("name")
             Correction = all_corrections[name]
+
             corr = Correction(
                 **correction,
                 apply_mask=apply_mask,

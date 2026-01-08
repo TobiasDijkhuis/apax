@@ -1,5 +1,5 @@
 from dataclasses import field
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import flax.linen as nn
 import jax
@@ -11,6 +11,7 @@ from jax import custom_vjp, vmap
 
 from apax.layers.masking import mask_by_atom, mask_by_neighbor
 from apax.utils.convert import str_to_dtype
+from apax.utils.helpers import get_attr_from_module
 from apax.utils.jax_md_reduced import space
 from apax.utils.math import fp64_sum
 
@@ -274,15 +275,31 @@ def create_energy_fn(
 class WrappedCalculator(EmpiricalEnergyTerm):
     """Wrapper around ASE Calculator instances such that they can be called
     similarly as other Modules, and their derivatives can be determined
-    by jax.grad. This can be used to run JAX-engine MD, or for Delta-ML."""
+    by jax.grad. This can be used to run JAX-engine MD, or for Delta-ML.
 
-    calculator: Optional[Calculator] = None
+    Attributes:
+        calculator_name: str
+            name of calculator, including full module name.
+            For example, for ORCA calculator, `ase.calculators.orca.ORCA`.
+        calculator_kwargs: dict
+            kwargs to initialize the calculator.
+    """
+
+    calculator_name: str = ""
+    calculator_kwargs: dict[str, Any] = field(default_factory=lambda: {})
 
     def setup(self):
-        if self.calculator is None:
-            raise AttributeError()
+        if self.calculator_name == "":
+            raise ValueError
 
-        self.energy_fn = create_energy_fn(self.calculator)
+        split_calculator_name = self.calculator_name.split(".")
+        module_name = ".".join(split_calculator_name[:-1])
+        class_name = split_calculator_name[-1]
+
+        CalculatorClass: Calculator = get_attr_from_module(module_name, class_name)
+        calculator = CalculatorClass(**self.calculator_kwargs)
+
+        self.energy_fn = create_energy_fn(calculator)
 
     def __call__(self, R, dr_vec, Z, idx, box, properties) -> float:
         dtype = str_to_dtype(self.dtype)
@@ -300,5 +317,5 @@ all_corrections = {
     "zbl": ZBLRepulsion,
     "exponential": ExponentialRepulsion,
     "latent_ewald": LatentEwald,
-    "delta_ml": WrappedCalculator,
+    "wrapped_calculator": WrappedCalculator,
 }
