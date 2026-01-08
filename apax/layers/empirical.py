@@ -1,6 +1,5 @@
 from dataclasses import field
-from functools import partial
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import flax.linen as nn
 import jax
@@ -169,38 +168,113 @@ class LatentEwald(EmpiricalEnergyTerm):
         return E_lr
 
 
-def create_energy_fn(calculator: Calculator):
-    def base_energy_fn(R, Z) -> float:
-        atoms = Atoms(positions=R, numbers=Z)
+def create_energy_fn(
+    calculator: Calculator,
+) -> Callable[[jax.Array, jax.Array, jax.Array], float]:
+    """Transform an ASE calculator to be differentiable by JAX.
+
+    Args:
+        calculator (Calculator): ASE calculator
+
+    Returns:
+        energy_fn (Callable): function that calculates the energy of a system.
+        This function takes R, Z, and box and returns the energy in eV.
+    """
+
+    def base_energy_fn(R: jax.Array, Z: jax.Array, box) -> float:
+        """Calculate the energy of the system using an ASE calculator
+
+        Args:
+            R (np.ndarray): postition vectors
+            Z (np.ndarray): atomic numbers
+
+        Returns:
+            energy (float): total energy of the system.
+                Units are ASE internal units, so eV
+        """
+
+        atoms = Atoms(positions=R, numbers=Z, cell=box)
         energy = calculator.get_potential_energy(atoms=atoms)
         return energy
 
-    def base_force_fn(R, Z) -> np.ndarray:  # , zeros_to_add: int) -> np.ndarray:
-        atoms = Atoms(positions=R, numbers=Z)
+    def base_force_fn(R: jax.Array, Z: jax.Array, box) -> np.ndarray:
+        """Calculate the forces using an ASE calculator
+
+        Args:
+            R (np.ndarray): postition vectors
+            Z (np.ndarray): atomic numbers
+
+        Returns:
+            forces (np.ndarray): force vectors, with same shape as R.
+                Units are ASE internal units, so eV/Angstrom
+        """
+        atoms = Atoms(positions=R, numbers=Z, cell=box)
         forces = calculator.get_forces(atoms=atoms)
         return forces
 
-    @partial(custom_vjp, nondiff_argnums=(1,))
-    def energy_fn(R, Z):
-        return jax.pure_callback(base_energy_fn, jax.ShapeDtypeStruct((), float), R, Z)
+    @custom_vjp
+    def energy_fn(
+        R: jax.Array,
+        dr_vec: jax.Array,
+        Z: jax.Array,
+        idx: list,
+        box: jax.Array,
+        properties: dict,
+    ) -> float:
+        """Calculate the energy of the system using an ASE calculator.
+        This was made to be auto-differentiable, such that jax.grad on this
+        function returns the gradient of the energy (i.e. the force with
+        opposite sign) in eV/Angstrom.
 
-    def force_fn_fwd(R, Z):
-        energy = energy_fn(R, Z)
-        forces = jax.pure_callback(
-            base_force_fn, jax.ShapeDtypeStruct(R.shape, float), R, Z
+        Args:
+            R (jax.Array): position vectors. Can be padded
+            dr_vec (jax.Array): not used
+            Z (jax.Array): atomic numbers. Can be padded
+            idx (jax.Array): not used
+            box (jax.Array): box of periodic boundary conditions
+            properties (dict): not used
+
+        Returns:
+            float: energy in eV (ASE internal units)
+        """
+        n_nonpadded = jnp.count_nonzero(Z)
+        return jax.pure_callback(
+            base_energy_fn,
+            jax.ShapeDtypeStruct((), float),
+            R[:n_nonpadded],
+            Z[:n_nonpadded],
+            box,
         )
-        return energy, (forces,)
 
-    def force_fn_bwd(Z, res, g):
+    def energy_fn_fwd(R, dr_vec, Z, idx, box, properties) -> tuple[float, jax.Array]:
+        energy = energy_fn(R, dr_vec, Z, idx, box, properties)
+
+        n_nonpadded = jnp.count_nonzero(Z)
+        # The gradient of the energy has opposite sign of the force.
+        energy_grad = -jax.pure_callback(
+            base_force_fn,
+            jax.ShapeDtypeStruct((n_nonpadded, 3), float),
+            R[:n_nonpadded],
+            Z[:n_nonpadded],
+            box,
+        )
+
+        zeros_to_add = Z.shape[0] - n_nonpadded
+        energy_grad = jnp.pad(energy_grad, ((0, zeros_to_add), (0, 0)), "constant")
+        return energy, (energy_grad, None, None, None, None, None)
+
+    def energy_fn_bwd(res, g):
         return res
 
-    energy_fn.defvjp(force_fn_fwd, force_fn_bwd)
+    energy_fn.defvjp(energy_fn_fwd, energy_fn_bwd)
 
     return energy_fn
 
 
-class DeltaMLBase(EmpiricalEnergyTerm):
-    """Base class to do Delta-ML."""
+class WrappedCalculator(EmpiricalEnergyTerm):
+    """Wrapper around ASE Calculator instances such that they can be called
+    similarly as other Modules, and their derivatives can be determined
+    by jax.grad. This can be used to run JAX-engine MD, or for Delta-ML."""
 
     calculator: Optional[Calculator] = None
 
@@ -210,28 +284,21 @@ class DeltaMLBase(EmpiricalEnergyTerm):
 
         self.energy_fn = create_energy_fn(self.calculator)
 
-    def __call__(self, R, dr_vec, Z, idx, box, properties):
-        # n_nonpadded = jnp.count_nonzero(Z)
+    def __call__(self, R, dr_vec, Z, idx, box, properties) -> float:
+        dtype = str_to_dtype(self.dtype)
 
-        energy = self.energy_fn(R, Z)
+        energy = jnp.astype(
+            self.energy_fn(R, dr_vec, Z, idx, box, properties),
+            dtype,
+        )
 
-        # zeros_to_add = Z.shape[0] - n_nonpadded
-
-        # force_fn = (
-        #     jax.tree_util.Partial(
-        #         jax.pure_callback,
-        #         callback=self.base_force_fn,
-        #         result_shape_dtypes=jax.ShapeDtypeStruct(R.shape, float),
-        #         zeros_to_add=zeros_to_add,
-        #     ),
-        # )
-
-        return energy  # , force_fn
+        assert energy.dtype == dtype
+        return energy
 
 
 all_corrections = {
     "zbl": ZBLRepulsion,
     "exponential": ExponentialRepulsion,
     "latent_ewald": LatentEwald,
-    "delta_ml": DeltaMLBase,
+    "delta_ml": WrappedCalculator,
 }

@@ -20,6 +20,14 @@ def make_minimal_input():
     return R, Z, idx, box, offsets
 
 
+def make_minimal_padded_input(n_pad: int = 1):
+    R, Z, idx, box, offsets = make_minimal_input()
+    R = jnp.pad(R, ((0, n_pad), (0, 0)), "constant")
+    Z = jnp.pad(Z, (0, n_pad), "constant")
+    idx = jnp.pad(idx, ((0, n_pad), (0, 0)), "constant")
+    return R, Z, idx, box, offsets
+
+
 def load_data(data_path):
     """
 
