@@ -194,9 +194,11 @@ class WrappedCalculator(EmpiricalEnergyTerm):
         if self.calculator is not None:
             # Having this option might throw an error, because a Calculator
             # is not a valid jax type. However, I added it for easy testing,
-            # it might need to be removed.
+            # it might need to be removed. Also, is it really necessary to have
+            # this stored in the WrappedCalculator instance?
             if self.calculator_name != "":
                 raise ValueError()
+            calculator = self.calculator
         else:
             if self.calculator_name == "":
                 raise ValueError
@@ -205,17 +207,14 @@ class WrappedCalculator(EmpiricalEnergyTerm):
             class_name = split_calculator_name[-1]
 
             CalculatorClass: Calculator = get_attr_from_module(module_name, class_name)
-            self.calculator = CalculatorClass(**self.calculator_kwargs)
+            calculator = CalculatorClass(**self.calculator_kwargs)
 
-        self.energy_fn = create_energy_fn(self.calculator)
+        self.energy_fn = create_energy_fn(calculator)
 
     def __call__(self, R, dr_vec, Z, idx, box, properties) -> float:
         dtype = str_to_dtype(self.dtype)
 
-        energy = jnp.astype(
-            self.energy_fn(R, dr_vec, Z, idx, box, properties),
-            dtype,
-        )
+        energy = dtype(self.energy_fn(R, dr_vec, Z, idx, box, properties))
 
         assert energy.dtype == dtype
         return energy
