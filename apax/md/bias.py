@@ -30,9 +30,18 @@ def apply_bias_auxiliary(bias: BiasEnergyBase, model) -> Callable[..., dict[str,
 
         prediction = model(R=R, Z=Z, neighbor=neighbor, box=box, offsets=offsets)
 
+        # TODO: For some reason, the "energy" of all the frames in a biased dynamics
+        # are 0 in the resulting md.h5 file. Fix this!
+        jax.debug.print("Bias energy: {}", E_bias, ordered=True)
+        jax.debug.print(
+            "prediction before adding unbiased keys: {}", prediction, ordered=True
+        )
         if "energy_unbiased" not in prediction:
             prediction["energy_unbiased"] = prediction["energy"]
             prediction["forces_unbiased"] = prediction["forces"]
+        jax.debug.print(
+            "prediction after adding unbiased keys:  {}", prediction, ordered=True
+        )
 
         for key in prediction:
             if "unbiased" in key or "uncertainty" in key:
@@ -47,6 +56,9 @@ def apply_bias_auxiliary(bias: BiasEnergyBase, model) -> Callable[..., dict[str,
                 # if "ensemble" in key:
                 # else:
                 #     prediction[key] = prediction[key] + E_bias
+        jax.debug.print(
+            "prediction after adding bias energies/forces: {}", prediction, ordered=True
+        )
 
         return prediction
 
