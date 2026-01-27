@@ -1,0 +1,26 @@
+checkpoint_interval: 2
+constraints:
+- indices:
+  - 0
+  name: fixatoms
+duration: 500
+dynamics_checks:
+- name: forces_uncertainty
+  threshold: 0.01
+ensemble:
+  dt: 0.2
+  name: nvt
+  temperature_schedule:
+    T0: 50
+    durations:
+    - 10
+    - 10
+    - 10
+    name: piecewise
+    temperatures:
+    - 100
+    - 200
+    - 1000
+n_inner: 5
+restart: true
+sampling_rate: 2

@@ -1,0 +1,37 @@
+data:
+  batch_size: 1
+  n_train: 10
+  n_valid: 2
+  valid_batch_size: 2
+loss:
+- loss_type: crps
+  name: energy
+- loss_type: crps
+  name: forces
+metrics:
+- name: energy
+  reductions:
+  - mae
+model:
+  basis:
+    n_basis: 5
+    name: gaussian
+  calc_stress: true
+  descriptor_dtype: fp64
+  empirical_corrections:
+  - name: zbl
+    r_max: 1.5
+  - name: exponential
+    r_max: 1.5
+  ensemble:
+    force_variance: true
+    kind: shallow
+    n_members: 4
+  n_radial: 3
+  name: gmnn
+  nn:
+  - 32
+  - 32
+  readout_dtype: fp32
+  scale_shift_dtype: fp64
+n_epochs: 5
