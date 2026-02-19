@@ -1,17 +1,20 @@
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TextIO
 
 from ase.units import fs as ase_fs
 
 try:
     from openmm.app import Simulation
-    from openmm.openmm import State
+    from openmm.openmm import MinimizationReporter, State
     from openmm.unit import angstrom, ev, femtosecond, item
 
     _openmm_imported = True
 except ImportError:
     _openmm_imported = False
+
+import matplotlib.pyplot as plt
+import numpy as np
 
 _float_width = 18
 
@@ -26,7 +29,7 @@ class XYZReporter:
 
     def __init__(
         self,
-        file: str | Path,
+        file: str | Path | TextIO,
         reportInterval: int,
         elements: list[str],
         enforcePeriodicBox: bool | None = None,
@@ -39,7 +42,9 @@ class XYZReporter:
         """
         Parameters
         ----------
-        file (str | Path): file to write to
+        file (str | Path | TextIO): file to write to. Can also be TextIO,
+            (for example `sys.stdout`) to write to console instead. Then, cannot
+            be append mode.
         reportInterval (int): Write a report every reportInterval steps
         elements (list[str]): Elemental symbols of the simulated system.
         enforcePeriodicBox (bool | None): Whether to wrap atomic coordinates
@@ -59,6 +64,10 @@ class XYZReporter:
             raise ImportError("XYZReporter requires OpenMM to be installed")
 
         if append:
+            if isinstance(file, TextIO):
+                raise ValueError(
+                    f'File with type {type(file)} cannot be opened in "append" mode'
+                )
             self._out = open(file, "a")
         else:
             self._out = open(file, "w")
@@ -156,3 +165,70 @@ class XYZReporter:
         self._flush_counter = 1
         if hasattr(self._out, "flush") and callable(self._out.flush):
             self._out.flush()
+
+
+class ApaxMinimizationReporter(MinimizationReporter):
+    # https://openmm.github.io/openmm-cookbook/dev/notebooks/cookbook/report_minimization.html
+
+    def __init__(self, file: str | Path | TextIO | None, reportInterval: int) -> None:
+        super().__init__()
+        if file is not None:
+            self._open = open(file, "w")
+        else:
+            self._open = None
+        self._reportInterval = reportInterval
+
+        self.data = {"iterations": [], "energy": [], "max_force": []}
+
+    def __del__(self) -> None:
+        if self._open is not None:
+            self._open.flush()
+            self._open.close()
+
+    def _write_header(self) -> None:
+        if self._open is not None:
+            self._open.write("Iteration,Energy (eV),Max force (eV/Angstrom)\n")
+            self._open.flush()
+
+    def report(
+        self, iteration: int, x: np.ndarray, grad: np.ndarray, args: dict[str, Any]
+    ) -> Literal[False]:
+        if iteration == 0:
+            self._write_header()
+
+        if iteration + 1 % self._reportInterval != 0:
+            return False
+
+        # Needs to be tested. Is the order correct?
+        # I.e., [x1, y1, z1, x2, y2, z2,...] -> [[x1, y1, z1], [x2, y2, z2], ...]
+        x = np.reshape(x.value_in_unit(angstrom), (-1, 3))
+
+        energy = args["system energy"].value_in_unit(ev / item)
+        max_gradient = np.max(np.abs(grad.value_in_unit(ev / (item * angstrom))))
+
+        self.data["iterations"].append(iteration)
+        self.data["energy"].append(energy)
+        self.data["max_force"].append(max_gradient)
+
+        if self._open is not None:
+            self._open.write(f"{iteration},{energy},{max_gradient}\n")
+            self._open.flush()
+
+        return False
+
+    def plot(
+        self,
+        data_key: Literal["energy", "max_force", "iterations"] = "energy",
+        ax: plt.Axes | None = None,
+    ) -> plt.Axes:
+        if data_key not in self.data:
+            raise KeyError(
+                f"Key {data_key} not in data dictionary. Possible keys are {self.data.keys()}"
+            )
+
+        if ax is None:
+            ax = plt.gca()
+        ax.plot(self.data["iterations"], self.data[data_key])
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel(data_key)
+        return ax
