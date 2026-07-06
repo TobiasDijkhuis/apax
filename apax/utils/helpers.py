@@ -127,11 +127,15 @@ def get_ase_mass(symbol_or_mass: str | int | float) -> float:
         float: Mass of element.
 
     Raises:
-        ValueError: If `symbol`or_mass` is an integer or float that is less
+        ValueError: If `symbol_or_mass` is an integer or float that is less
             than or equal to 0.
+        TypeError: If `symbol_or_mass` is not a string, integer or float.
 
     """
     if isinstance(symbol_or_mass, str):
+        if symbol_or_mass not in atomic_numbers:
+            msg = f"Unknown element symbol '{symbol_or_mass}'."
+            raise ValueError(msg)
         atomic_number = atomic_numbers[symbol_or_mass]
         return atomic_masses[atomic_number]
     elif isinstance(symbol_or_mass, int | float):
@@ -140,7 +144,9 @@ def get_ase_mass(symbol_or_mass: str | int | float) -> float:
             raise ValueError(msg)
         return float(symbol_or_mass)
     else:
-        raise TypeError
+        raise TypeError(
+            f"Expected a string or number for mass, got {type(symbol_or_mass)}."
+        )
 
 
 def get_updated_atomic_masses(
@@ -158,22 +164,15 @@ def get_updated_atomic_masses(
     Returns:
         atomic_masses_cpy (np.ndarray): Array with the updated atomic masses.
 
-    Raises:
-        ValueError: If duplicate elements are found in `custom_mass_dictionary`.
-
     """
     atomic_masses_cpy = atomic_masses.copy()
-    seen_elements = set()
     for element, symbol_or_mass in custom_mass_dictionary.items():
-        if element in seen_elements:
-            msg = f"Duplicate element {element} encountered in custom mass dictionary."
-            raise ValueError(msg)
-        seen_elements.add(element)
-
-        log.info(f"Setting mass of element {element} to {symbol_or_mass}")
-        custom_mass_dictionary[element] = get_ase_mass(symbol_or_mass)
+        element_mass = get_ase_mass(symbol_or_mass)
         atomic_number = atomic_numbers[element]
-        atomic_masses_cpy[atomic_number] = custom_mass_dictionary[element]
+        log.info(
+            f"Setting mass of element {element} (atomic number {atomic_number}) to {symbol_or_mass}"
+        )
+        atomic_masses_cpy[atomic_number] = element_mass
 
     return atomic_masses_cpy
 
