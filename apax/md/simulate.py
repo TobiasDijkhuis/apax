@@ -7,14 +7,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
-from ase import units, Atoms
+from ase import Atoms, units
 from ase.io import read
 from jax.experimental import io_callback
 from jax_md import partition, quantity, simulate, space
 from tqdm import trange
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from apax.utils.helpers import get_masses
 from apax.config import Config, MDConfig, parse_config
 from apax.config.md_config import Integrator
 from apax.md.ase_calc import make_ensemble, maybe_vmap
@@ -33,6 +32,7 @@ from apax.train.checkpoints import (
     restore_parameters,
 )
 from apax.train.run import setup_logging
+from apax.utils.helpers import get_masses
 
 log = logging.getLogger(__name__)
 

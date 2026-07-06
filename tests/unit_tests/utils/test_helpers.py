@@ -1,13 +1,14 @@
-from apax.utils.helpers import (
-    update_nested_dictionary,
-    get_masses,
-    get_ase_mass,
-    get_updated_atomic_masses,
-)
-import pytest
 import numpy as np
-from ase.data import atomic_masses
+import pytest
 from ase import Atoms
+from ase.data import atomic_masses
+
+from apax.utils.helpers import (
+    get_ase_mass,
+    get_masses,
+    get_updated_atomic_masses,
+    update_nested_dictionary,
+)
 
 
 def test_update_nested_dictionary():

@@ -3,11 +3,11 @@ import csv
 import logging
 from pathlib import Path
 from typing import Any, Union
-from ase.data import atomic_numbers, atomic_masses, atomic_numbers
 
-from ase import Atoms, Atom
-import yaml
 import numpy as np
+import yaml
+from ase import Atoms
+from ase.data import atomic_masses, atomic_numbers
 
 # default whitelist of properties for jaxMD
 APAX_PROPERTIES = [

@@ -15,9 +15,9 @@ from jax_md import partition, space
 
 from apax.config import Config, MDConfig
 from apax.md import run_md
-from apax.md.simulate import md_setup
 from apax.md.ase_calc import ASECalculator
 from apax.md.function_transformations import UncertaintyDrivenDynamics
+from apax.md.simulate import md_setup
 from apax.utils import math
 from tests.conftest import load_config_and_run_training
 
