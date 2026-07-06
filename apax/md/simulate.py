@@ -7,13 +7,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
-from ase import units
+from ase import units, Atoms
 from ase.io import read
 from jax.experimental import io_callback
 from jax_md import partition, quantity, simulate, space
 from tqdm import trange
 from tqdm.contrib.logging import logging_redirect_tqdm
 
+from apax.utils.helpers import get_masses
 from apax.config import Config, MDConfig, parse_config
 from apax.config.md_config import Integrator
 from apax.md.ase_calc import make_ensemble, maybe_vmap
@@ -484,7 +485,9 @@ def md_setup(model_config: Config, md_config: MDConfig):
         Shift function for the integrator.
     """
     log.info("reading structure")
-    atoms = read(md_config.initial_structure)
+    atoms: Atoms = read(md_config.initial_structure)
+    atoms.set_masses(masses=get_masses(md_config.custom_element_masses, atoms))
+
     system = System.from_atoms(atoms)
 
     r_max = model_config.model.basis.r_max
