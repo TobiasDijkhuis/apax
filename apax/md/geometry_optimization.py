@@ -12,6 +12,7 @@ from jax_md import partition, quantity, simulate, space
 from tqdm import trange
 from tqdm.contrib.logging import logging_redirect_tqdm
 
+import optax
 from apax.config import Config, MDConfig, parse_config
 from apax.config.md_config import GeometryOptimizationConfig
 from apax.config.optimizer_config import GeometryOptimizerConfig
@@ -96,109 +97,95 @@ def run_optimization_sim(
     )
 
     log.info("initializing simulation")
-    init_fn, apply_fn, kT, nbr_options = get_ensemble(ensemble, sim_fns, constrained_idxs)
 
     neighbor = sim_fns.neighbor_fn.allocate(
         system.positions, extra_capacity=extra_capacity
     )
 
-    state = init_fn(
-        rng_key,
-        system.positions,
-        box=system.box,
-        mass=system.masses,
-        neighbor=neighbor,
-    )
+    # state = init_fn(
+    #     rng_key,
+    #     system.positions,
+    #     box=system.box,
+    #     mass=system.masses,
+    #     neighbor=neighbor,
+    # )
 
-    step = 0
+    # step = 0
 
-    options = ocp.CheckpointManagerOptions(max_to_keep=1, save_interval_steps=1)
-    mngr = ocp.CheckpointManager(ckpt_dir.resolve(), options=options)
+    # options = ocp.CheckpointManagerOptions(max_to_keep=1, save_interval_steps=1)
+    # mngr = ocp.CheckpointManager(ckpt_dir.resolve(), options=options)
 
-    ckpts_exist = mngr.latest_step() is not None
+    # ckpts_exist = mngr.latest_step() is not None
 
-    should_load_ckpt = restart and ckpts_exist
-    state, step = handle_checkpoints(
-        state, step, system, False, ckpt_dir, should_load_ckpt
-    )
-    if should_load_ckpt:
-        length = step * n_inner
-        truncate_trajectory_to_checkpoint(traj_handler.traj_path, length)
+    # should_load_ckpt = restart and ckpts_exist
+    # state, step = handle_checkpoints(
+    #     state, step, system, False, ckpt_dir, should_load_ckpt
+    # )
+    # if should_load_ckpt:
+    #     length = step * n_inner
+    #     truncate_trajectory_to_checkpoint(traj_handler.traj_path, length)
 
-    initial_step = step  # used for measuring time correctly
+    # on_eval, no_eval = create_evaluation_functions(
+    #     traj_handler,
+    #     sim_fns.auxiliary_fn,
+    #     system.atomic_numbers,
+    #     neighbor,
+    #     [],
+    # )
 
-    n_outer = int(np.ceil(max_steps / n_inner))
-    pbar_update_freq = int(np.ceil(500 / n_inner))
-    pbar_increment = n_inner * pbar_update_freq
+    def loss_fn(params, **kwargs):
+        return energy_fn(params, **kwargs)
 
-    on_eval, no_eval = create_evaluation_functions(
-        traj_handler,
-        sim_fns.auxiliary_fn,
-        system.atomic_numbers,
-        neighbor,
-        [],
-    )
+    optimizer = optax.lbfgs(0.01)
+    opt_state = optimizer.init(params)
 
     @jax.jit
-    def sim(state, outer_step, neighbor):  # TODO make more modular
-        def body_fn(i, state):
-            state, outer_step, neighbor, all_checks_passed = state
-            step = i + outer_step * n_inner
+    def step_fn(params, opt_state):  # TODO make more modular
+        gradients = jax.grad(loss_fn)(params)
+        updates, opt_state = optimizer.update(gradients, opt_state, params)
+        params = optax.apply_updates(params, updates)
+        return params, opt_state
 
-            apply_fn_kwargs = {}
-            if isinstance(state, simulate.NPTNoseHooverState):
-                box = state.box
-            else:
-                box = system.box
-                apply_fn_kwargs = {"box": box}
+    #     def body_fn(i, state):
+    #         state, outer_step, neighbor, all_checks_passed = state
+    #         step = i + outer_step * n_inner
 
-            apply_fn_kwargs["kT"] = kT(step)  # Get current Temperature
+    #         apply_fn_kwargs = {}
+    #         if isinstance(state, simulate.NPTNoseHooverState):
+    #             box = state.box
+    #         else:
+    #             box = system.box
+    #             apply_fn_kwargs = {"box": box}
 
-            state = apply_fn(state, neighbor=neighbor, **apply_fn_kwargs)
+    #         state = apply_fn(state, neighbor=neighbor, **apply_fn_kwargs)
 
-            state = apply_constraints(state)
+    #         state = apply_constraints(state)
 
-            nbr_kwargs = nbr_options(state)
-            neighbor = neighbor.update(state.position, **nbr_kwargs)
+    #         nbr_kwargs = nbr_options(state)
+    #         neighbor = neighbor.update(state.position, **nbr_kwargs)
 
-            condition = step % sampling_rate == 0
-            checks_passed = jax.lax.cond(
-                condition, on_eval, no_eval, state, neighbor, box, nbr_kwargs
-            )
+    #         condition = step % sampling_rate == 0
+    #         checks_passed = jax.lax.cond(
+    #             condition, on_eval, no_eval, state, neighbor, box, nbr_kwargs
+    #         )
 
-            all_checks_passed = all_checks_passed & checks_passed
-            return state, outer_step, neighbor, all_checks_passed
+    #         all_checks_passed = all_checks_passed & checks_passed
+    #         return state, outer_step, neighbor, all_checks_passed
 
-        all_checks_passed = True
-        state, outer_step, neighbor, all_checks_passed = jax.lax.fori_loop(
-            0, n_inner, body_fn, (state, outer_step, neighbor, all_checks_passed)
-        )
-        current_temperature = (
-            quantity.temperature(velocity=state.velocity, mass=state.mass) / units.kB
-        )
+    #     all_checks_passed = True
+    #     state, _outer_step, neighbor, all_checks_passed = jax.lax.fori_loop(
+    #         0, n_inner, body_fn, (state, outer_step, neighbor, all_checks_passed)
+    #     )
 
-        return state, neighbor, current_temperature, all_checks_passed
+    #     return state, neighbor, all_checks_passed
 
-    start = time.time()
-    total_sim_time = max_steps * ensemble.dt / 1000
-    log.info("running simulation for %.1f ps", total_sim_time)
-    initial_time = step * n_inner
-    sim_pbar = trange(
-        initial_time,
-        max_steps,
-        initial=initial_time,
-        total=max_steps,
-        desc="Simulation",
-        ncols=100,
-        disable=disable_pbar,
-        leave=True,
-    )
     sim_time_per_step = n_inner * ensemble.dt / 1000
+    converged = False
+    step = 0
     with mngr:
-        while step < n_outer:
-            new_state, neighbor, current_temperature, all_checks_passed = sim(
-                state, step, neighbor
-            )
+        while not converged:
+            params, opt_state = step_fn(params, opt_state)
+            step += 1
 
             check_for_nans(state, step)
 
@@ -218,36 +205,15 @@ def run_optimization_sim(
             maybe_save_checkpoint(
                 mngr, state, step, checkpoint_interval, sim_time_per_step
             )
-            maybe_update_pbar(
-                sim_pbar, step, pbar_update_freq, pbar_increment, current_temperature
-            )
 
-        # In case of mismatch update freq and n_steps, we can set it to 100% manually
-        sim_pbar.update(max_steps - sim_pbar.n)
-        sim_pbar.close()
+            if step > max_steps:
+                log.warning("Optimization did not converge.")
 
         ckpt = {"state": state, "step": step}
         mngr.save(step, args=ocp.args.StandardSave(ckpt))
 
     traj_handler.write()
     traj_handler.close()
-    end = time.time()
-    elapsed_wall_time = end - start
-    elapsed_sim_time = (step - initial_step) * n_inner * ensemble.dt / 1000
-
-    ps_per_s = elapsed_sim_time / elapsed_wall_time
-    nanosec_per_day = ps_per_s / 1e3 * 60 * 60 * 24
-
-    sec_per_step = elapsed_wall_time / max_steps
-    n_atoms = system.positions.shape[0]
-    musec_per_step_per_atom = sec_per_step * 1e6 / n_atoms
-
-    log.info("simulation finished after: %.2f s", elapsed_wall_time)
-    log.info(
-        "performance summary: %.2f ns/day, %.2f mu s/step/atom",
-        nanosec_per_day,
-        musec_per_step_per_atom,
-    )
 
 
 def optimization_setup(
