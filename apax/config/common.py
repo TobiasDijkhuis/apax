@@ -5,7 +5,7 @@ from typing import Any, Union
 
 import yaml
 
-from apax.config.md_config import MDConfig
+from apax.config.md_config import GeometryOptimizationConfig, MDConfig
 from apax.config.optuna_config import OptunaConfig
 from apax.config.train_config import Config
 
@@ -22,7 +22,8 @@ def parse_config(config: Union[str, os.PathLike, dict], mode: str = "train") -> 
             containing the config.
         mode: str, default = train
             Defines if the config is validated for training ("train"),
-            MD simulation ("md") or hyperparameter optimization ("optuna")
+            MD simulation ("md"), geeomtry optimization ("geom_opt") or
+            hyperparameter optimization ("optuna")
     """
     if isinstance(config, (str, os.PathLike)):
         with open(config, "r") as stream:
@@ -34,6 +35,8 @@ def parse_config(config: Union[str, os.PathLike, dict], mode: str = "train") -> 
         config = MDConfig.model_validate(config)
     elif mode == "optuna":
         config = OptunaConfig.model_validate(config)
+    elif mode == "geom_opt":
+        config = GeometryOptimizationConfig.model_validate(config)
 
     return config
 

@@ -8,11 +8,11 @@ from jax_md import space
 
 @dataclasses.dataclass
 class System:
-    atomic_numbers: jnp.array
-    masses: jnp.array
-    positions: jnp.array
-    box: jnp.array
-    momenta: Optional[jnp.array]
+    atomic_numbers: jnp.ndarray
+    masses: jnp.ndarray
+    positions: jnp.ndarray
+    box: jnp.ndarray
+    momenta: Optional[jnp.ndarray]
 
     @classmethod
     def from_atoms(cls, atoms):

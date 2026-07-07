@@ -5,6 +5,7 @@ import yaml
 from pydantic import BaseModel, Field, NonNegativeInt, PositiveFloat, PositiveInt
 from typing_extensions import Annotated
 
+from apax.config.optimizer_config import GeometryOptimizerConfig
 from apax.utils.helpers import APAX_PROPERTIES
 
 
@@ -296,7 +297,35 @@ class H5MDOptions(BaseModel, extra="forbid"):
     author_email: str = "N/A"
 
 
-class MDConfig(BaseModel, frozen=True, extra="forbid"):
+class DynamicsConfig(BaseModel, frozen=True, extra="forbid"):
+    seed: int = 1
+
+    n_inner: PositiveInt = 500
+    sampling_rate: PositiveInt = 10
+    buffer_size: PositiveInt = 2500
+    dr_threshold: PositiveFloat = 0.5
+    extra_capacity: NonNegativeInt = 0
+    disable_cell_list: bool = False
+
+    biases: list[BiasEnergy] = []
+    dynamics_checks: list[DynamicsCheck] = []
+    constraints: list[Constraint] = []
+
+    properties: list[str] = APAX_PROPERTIES
+    h5md_options: H5MDOptions = H5MDOptions()
+
+    initial_structure: str
+    load_momenta: bool = False
+    sim_dir: str = "."
+
+    traj_name: str = "md.h5"
+    restart: bool = True
+    wrapped: bool = True
+    checkpoint_interval: int = 50_000
+    disable_pbar: bool = False
+
+
+class MDConfig(DynamicsConfig, frozen=True, extra="forbid"):
     """
     Configuration for a NHC molecular dynamics simulation.
     Full config :ref:`here <md_config>`:
@@ -353,36 +382,25 @@ class MDConfig(BaseModel, frozen=True, extra="forbid"):
         | Disables the MD progressbar.
     """
 
-    seed: int = 1
-
     # https://docs.pydantic.dev/latest/usage/types/unions/#discriminated-unions-aka-tagged-unions
     ensemble: Union[NVEOptions, NVTOptions, NPTOptions] = Field(
         NVTOptions(name="nvt"), discriminator="name"
     )
 
     duration: PositiveFloat
-    n_inner: PositiveInt = 500
-    sampling_rate: PositiveInt = 10
-    buffer_size: PositiveInt = 2500
-    dr_threshold: PositiveFloat = 0.5
-    extra_capacity: NonNegativeInt = 0
-    disable_cell_list: bool = False
 
-    biases: list[BiasEnergy] = []
-    dynamics_checks: list[DynamicsCheck] = []
-    constraints: list[Constraint] = []
+    def dump_config(self):
+        """
+        Writes the current config file to the MD directory.
 
-    properties: list[str] = APAX_PROPERTIES
-    h5md_options: H5MDOptions = H5MDOptions()
+        """
+        with open(os.path.join(self.sim_dir, "md_config.yaml"), "w") as conf:
+            yaml.dump(self.model_dump(), conf, default_flow_style=False)
 
-    initial_structure: str
-    load_momenta: bool = False
-    sim_dir: str = "."
-    traj_name: str = "md.h5"
-    restart: bool = True
-    wrapped: bool = True
-    checkpoint_interval: int = 50_000
-    disable_pbar: bool = False
+
+class GeometryOptimizationConfig(DynamicsConfig, frozen=True, extra="forbid"):
+    fmax: float
+    optimizer: GeometryOptimizerConfig
 
     def dump_config(self):
         """

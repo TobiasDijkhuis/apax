@@ -15,8 +15,8 @@ from pydantic import (
 )
 from typing_extensions import Annotated
 
-from apax.config.lr_config import CyclicCosineLR, LinearLR
 from apax.config.model_config import GMNNConfig, ModelConfig
+from apax.config.optimizer_config import ModelOptimizerConfig
 from apax.data.statistics import scale_method_list, shift_method_list
 
 log = logging.getLogger(__name__)
@@ -210,55 +210,6 @@ class DataConfig(BaseModel, extra="forbid"):
     @property
     def best_model_path(self):
         return self.model_version_path / "best"
-
-
-class OptimizerConfig(BaseModel, frozen=True, extra="forbid"):
-    """
-    Configuration of the optimizer.
-    Learning rates of 0 will freeze the respective parameters.
-
-    Parameters
-    ----------
-    name : str, default = "adam"
-        Name of the optimizer. Can be any `optax` optimizer.
-    emb_lr : NonNegativeFloat, default = 0.001
-        Learning rate of the elemental embedding contraction coefficients.
-    nn_lr : NonNegativeFloat, default = 0.001
-        Learning rate of the neural network parameters.
-    scale_lr : NonNegativeFloat, default = 0.0001
-        Learning rate of the elemental output scaling factors.
-    shift_lr : NonNegativeFloat, default = 0.003
-        Learning rate of the elemental output shifts.
-    zbl_lr : NonNegativeFloat, default = 0.0001
-        Learning rate of the ZBL correction parameters.
-    rep_scale_lr : NonNegativeFloat, default = 0.001
-        LR for the length scale of these exponential repulsion potential.
-    rep_prefactor_lr : NonNegativeFloat, default = 0.0001
-        LR for the strength of the exponential repulsion potential.
-    gradient_clipping: NonNegativeFloat, default = 1000.0
-        Per element Gradient clipping value.
-        Default is so high that it effectively disabled.
-    schedule : LRSchedule = LinearLR
-        Learning rate schedule.
-    kwargs : dict, default = {}
-        Optimizer keyword arguments. Passed to the `optax` optimizer.
-    """
-
-    name: str = "adam"
-    emb_lr: NonNegativeFloat = 0.001
-    nn_lr: NonNegativeFloat = 0.001
-    scale_lr: NonNegativeFloat = 0.0001
-    shift_lr: NonNegativeFloat = 0.003
-    zbl_lr: NonNegativeFloat = 0.0001
-    rep_scale_lr: NonNegativeFloat = 0.001
-    rep_prefactor_lr: NonNegativeFloat = 0.0001
-
-    gradient_clipping: NonNegativeFloat = 1000.0
-
-    schedule: Union[LinearLR, CyclicCosineLR] = Field(
-        LinearLR(name="linear"), discriminator="name"
-    )
-    kwargs: Optional[dict[str, Any]] = Field(default_factory=dict)
 
 
 class MetricsConfig(BaseModel, extra="forbid"):
@@ -468,7 +419,7 @@ class Config(BaseModel, frozen=True, extra="forbid"):
         | Metrics configuration.
     loss : List of :class:`.LossConfig`
         | Loss configuration.
-    optimizer : :class:`.OptimizerConfig`
+    optimizer : :class:`.ModelOptimizerConfig`
         | Loss optimizer configuration.
     weight_average : :class:`.WeightAverage`, optional
         | Options for averaging weights between epochs.
@@ -495,7 +446,7 @@ class Config(BaseModel, frozen=True, extra="forbid"):
     model: ModelConfig = Field(GMNNConfig(name="gmnn"), discriminator="name")
     metrics: List[MetricsConfig] = []
     loss: List[LossConfig]
-    optimizer: OptimizerConfig = OptimizerConfig()
+    optimizer: ModelOptimizerConfig = ModelOptimizerConfig()
     weight_average: Optional[WeightAverage] = None
     callbacks: List[CallBack] = [CSVCallback(name="csv")]
     progress_bar: TrainProgressbarConfig = TrainProgressbarConfig()
